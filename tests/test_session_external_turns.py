@@ -64,6 +64,31 @@ def test_re_enqueueing_one_event_does_not_produce_two_turns():
     assert len(pending_external_turns("S")) == 1
 
 
+def test_structured_display_metadata_round_trips_and_first_event_wins():
+    metadata = {
+        "reason": "QUESTION",
+        "delegate_session_id": "asess_1",
+        "delegate_message_id": "msg_1",
+    }
+    assert enqueue_external_turn(
+        event_id="W1",
+        target_session_key="S",
+        body="Which API?",
+        source="delegate-wave",
+        display_metadata=metadata,
+    ) is True
+    assert enqueue_external_turn(
+        event_id="W1",
+        target_session_key="S",
+        body="forged replacement",
+        source="delegate-wave",
+        display_metadata={"reason": "COMPLETED"},
+    ) is False
+    row = get_external_turn("W1")
+    assert row["body"] == "Which API?"
+    assert row["display_metadata"] == metadata
+
+
 def test_an_event_is_only_visible_to_its_target_session():
     enqueue(event_id="E1", key="S1")
     enqueue(event_id="E2", key="S2")

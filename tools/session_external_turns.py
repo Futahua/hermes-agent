@@ -69,13 +69,14 @@ after an ambiguous outcome is idempotent here by construction.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Mapping, Optional
 
 from hermes_constants import get_hermes_home
 
@@ -122,6 +123,7 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             target_session_key TEXT NOT NULL,
             body TEXT NOT NULL,
             source TEXT NOT NULL,
+            display_metadata TEXT,
             state TEXT NOT NULL DEFAULT 'PENDING',
             claim_id TEXT,
             owner_pid INTEGER,
@@ -134,6 +136,11 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             last_error TEXT
         )"""
     )
+    columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(session_external_turns)")
+    }
+    if "display_metadata" not in columns:
+        conn.execute("ALTER TABLE session_external_turns ADD COLUMN display_metadata TEXT")
     conn.execute(
         """CREATE INDEX IF NOT EXISTS idx_session_external_turns_pending
            ON session_external_turns(target_session_key, state, created_at)"""
@@ -197,6 +204,7 @@ def enqueue_external_turn(
     target_session_key: str,
     body: str,
     source: str,
+    display_metadata: Optional[Mapping[str, Any]] = None,
 ) -> bool:
     """Queue one activation for a stored session. Returns False if already queued.
 
@@ -209,12 +217,19 @@ def enqueue_external_turn(
     eid = str(event_id or "").strip()
     if not eid or not key:
         raise ValueError("event_id and target_session_key are both required")
+    if display_metadata is not None and not isinstance(display_metadata, Mapping):
+        raise ValueError("display_metadata must be an object when provided")
+    metadata_json = (
+        json.dumps(dict(display_metadata), ensure_ascii=False, sort_keys=True)
+        if display_metadata is not None
+        else None
+    )
     with _transaction() as conn:
         cur = conn.execute(
             """INSERT OR IGNORE INTO session_external_turns
-               (event_id, target_session_key, body, source, state, created_at)
-               VALUES (?, ?, ?, ?, 'PENDING', ?)""",
-            (eid, key, str(body), str(source or "external"), time.time()),
+               (event_id, target_session_key, body, source, display_metadata, state, created_at)
+               VALUES (?, ?, ?, ?, ?, 'PENDING', ?)""",
+            (eid, key, str(body), str(source or "external"), metadata_json, time.time()),
         )
         return bool(cur.rowcount)
 
@@ -235,6 +250,12 @@ def get_external_turn(event_id: str) -> Optional[Dict[str, Any]]:
     if row is None:
         return None
     record = dict(row)
+    if record.get("display_metadata"):
+        try:
+            decoded = json.loads(record["display_metadata"])
+            record["display_metadata"] = decoded if isinstance(decoded, dict) else None
+        except (TypeError, ValueError):
+            record["display_metadata"] = None
     record["owner_alive"] = bool(
         record.get("state") in (CLAIMED, STARTED)
         and _claimer_alive(record.get("owner_pid"), record.get("owner_started_at"))
@@ -268,6 +289,12 @@ def pending_external_turns(target_session_key: str, limit: int = 16) -> List[Dic
             (key, int(limit)),
         ):
             record = dict(row)
+            if record.get("display_metadata"):
+                try:
+                    decoded = json.loads(record["display_metadata"])
+                    record["display_metadata"] = decoded if isinstance(decoded, dict) else None
+                except (TypeError, ValueError):
+                    record["display_metadata"] = None
             if record.get("state") == CLAIMED and _claimer_alive(
                 record.get("owner_pid"), record.get("owner_started_at")
             ):

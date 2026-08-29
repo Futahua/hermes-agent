@@ -573,6 +573,7 @@ CREATE TABLE IF NOT EXISTS session_external_turns (
     target_session_key TEXT NOT NULL,
     body TEXT NOT NULL,
     source TEXT NOT NULL,
+    display_metadata TEXT,
     -- PENDING -> CLAIMED -> STARTED -> FINISHED. The last two are what let a
     -- producer tell "still being reasoned about" from "the turn died", which is
     -- indistinguishable in the transcript and which its own liveness used to

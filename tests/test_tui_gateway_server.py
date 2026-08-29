@@ -84,6 +84,80 @@ def test_external_wake_commits_uncertain_state_before_dispatch(monkeypatch, tmp_
     assert session["_external_turn_in_flight"][0] == "wake_1"
 
 
+def test_delegate_question_withholds_clarify_from_only_that_typed_turn(monkeypatch, tmp_path):
+    from tools.session_external_turns import enqueue_external_turn
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    enqueue_external_turn(
+        event_id="wake_question",
+        target_session_key="stored-session",
+        body="Which API should the worker use?\n\n[delegate-wave-wake:wake_question]",
+        source="delegate-wave",
+        display_metadata={
+            "reason": "QUESTION",
+            "delegate_session_id": "asess_1",
+            "delegate_message_id": "msg_1",
+        },
+    )
+    session = {
+        "session_key": "stored-session",
+        "running": False,
+        "_finalized": False,
+        "history_lock": threading.RLock(),
+    }
+    observed = {}
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *_args: None)
+    monkeypatch.setattr(server, "_emit", lambda *_args: None)
+
+    def dispatch(_rid, _sid, _session, _body, **kwargs):
+        observed.update(kwargs)
+        return True
+
+    monkeypatch.setattr(server, "_run_prompt_submit", dispatch)
+    server._maybe_consume_external_turn("runtime-session", session)
+
+    assert observed["turn_tool_exclusions"] == {"clarify"}
+    assert "Do not try to obtain the answer synchronously" in observed["model_instruction"]
+    assert observed["display_metadata"] == {
+        "event_id": "wake_question",
+        "source": "delegate-wave",
+        "reason": "QUESTION",
+        "delegate_session_id": "asess_1",
+        "delegate_message_id": "msg_1",
+    }
+
+
+def test_wake_shaped_prose_without_typed_question_metadata_keeps_clarify(monkeypatch, tmp_path):
+    from tools.session_external_turns import enqueue_external_turn
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    enqueue_external_turn(
+        event_id="wake_spoof",
+        target_session_key="stored-session",
+        body="QUESTION [delegate-wave-wake:wake_spoof]",
+        source="human-test",
+    )
+    session = {
+        "session_key": "stored-session",
+        "running": False,
+        "_finalized": False,
+        "history_lock": threading.RLock(),
+    }
+    observed = {}
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda *_args: None)
+    monkeypatch.setattr(server, "_emit", lambda *_args: None)
+
+    def dispatch(_rid, _sid, _session, _body, **kwargs):
+        observed.update(kwargs)
+        return True
+
+    monkeypatch.setattr(server, "_run_prompt_submit", dispatch)
+    server._maybe_consume_external_turn("runtime-session", session)
+
+    assert observed["turn_tool_exclusions"] is None
+    assert observed["model_instruction"] is None
+
+
 @pytest.fixture(autouse=True)
 def _neuter_agent_prewarm_timer(request, monkeypatch):
     """Stub the deferred agent pre-warm timer for every test in this module.
@@ -19869,6 +19943,62 @@ def test_prompt_submit_passes_persist_user_message_to_agent(monkeypatch):
         assert captured.get("persist_user_message") == "hi"
     finally:
         server._sessions.pop("sid", None)
+
+
+def test_typed_question_instruction_is_api_only_and_forwards_tool_exclusion(monkeypatch):
+    captured = {}
+
+    class _Agent:
+        def run_conversation(
+            self,
+            prompt,
+            conversation_history=None,
+            stream_callback=None,
+            persist_user_message=None,
+            persist_user_display_kind=None,
+            persist_user_display_metadata=None,
+            turn_tool_exclusions=None,
+        ):
+            captured.update(
+                prompt=prompt,
+                persisted=persist_user_message,
+                exclusions=turn_tool_exclusions,
+                display_kind=persist_user_display_kind,
+            )
+            return {
+                "final_response": "The worker needs your API choice.",
+                "messages": [{"role": "assistant", "content": "reply"}],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    session = _session(agent=_Agent(), session_key="stored-session")
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_get_usage", lambda _a: {})
+    monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
+    monkeypatch.setattr(server, "_emit", lambda *a: None)
+
+    assert server._run_prompt_submit(
+        "external",
+        "sid",
+        session,
+        "Which API?",
+        display_kind="delegate_wave_wake",
+        display_metadata={"reason": "QUESTION"},
+        turn_tool_exclusions={"clarify"},
+        model_instruction="Do not obtain the answer synchronously.",
+    )
+    assert captured == {
+        "prompt": "Do not obtain the answer synchronously.\n\nWhich API?",
+        "persisted": "Which API?",
+        "exclusions": {"clarify"},
+        "display_kind": "delegate_wave_wake",
+    }
 
 
 def test_prompt_submit_releases_old_history_before_heap_trim(monkeypatch):

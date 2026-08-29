@@ -64,6 +64,19 @@ def synchronize_agent_tools_for_turn(agent: Any) -> None:
     refresh_agent_tools(agent, quiet_mode=True)
 
 
+def apply_turn_tool_exclusions(agent: Any, tool_names: Optional[set[str]]) -> None:
+    """Withhold selected tools after the normal refresh for this turn only."""
+    excluded = {str(name) for name in (tool_names or set()) if name}
+    if not excluded:
+        return
+    agent.tools = [
+        tool
+        for tool in (getattr(agent, "tools", None) or [])
+        if str((tool.get("function") or {}).get("name") or "") not in excluded
+    ]
+    agent.valid_tool_names = set(getattr(agent, "valid_tool_names", set())) - excluded
+
+
 def _preflight_request_tokens(
     agent: Any,
     messages: List[Dict[str, Any]],
@@ -529,6 +542,7 @@ def build_turn_context(
     *,
     persist_user_display_kind: Optional[str] = None,
     persist_user_display_metadata: Optional[Dict[str, Any]] = None,
+    turn_tool_exclusions: Optional[set[str]] = None,
     restore_or_build_system_prompt,
     install_safe_stdio,
     sanitize_surrogates,
@@ -608,6 +622,7 @@ def build_turn_context(
     # rebuild also picks up late MCP registrations when present, but zero MCP
     # servers follow this exact path too.
     synchronize_agent_tools_for_turn(agent)
+    apply_turn_tool_exclusions(agent, turn_tool_exclusions)
 
     # Sanitize surrogate characters from user input.
     if isinstance(user_message, str):

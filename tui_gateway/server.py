@@ -11960,6 +11960,13 @@ def _maybe_consume_external_turn(sid: str, session: dict) -> None:
         return
     row = rows[0]
     event_id = str(row.get("event_id") or "")
+    source = str(row.get("source") or "external")
+    producer_metadata = row.get("display_metadata")
+    if not isinstance(producer_metadata, dict):
+        producer_metadata = {}
+    is_delegate_question = (
+        source == "delegate-wave" and producer_metadata.get("reason") == "QUESTION"
+    )
 
     # Gate 2 before gate 3: claiming a row we are not entitled to run would take
     # it out of circulation from the process that IS entitled to run it.
@@ -12013,9 +12020,20 @@ def _maybe_consume_external_turn(sid: str, session: dict) -> None:
                 str(row.get("body") or ""),
                 display_kind="delegate_wave_wake",
                 display_metadata={
+                    **producer_metadata,
                     "event_id": event_id,
-                    "source": str(row.get("source") or "external"),
+                    "source": source,
                 },
+                turn_tool_exclusions={"clarify"} if is_delegate_question else None,
+                model_instruction=(
+                    "This is an asynchronous Delegate Wave needs-input notification. "
+                    "Explain the delegated question to the user and end this turn. "
+                    "Do not try to obtain the answer synchronously. When the user replies "
+                    "in a later turn, use session_answer for the Delegate Wave session "
+                    "identified in the notification."
+                    if is_delegate_question
+                    else None
+                ),
             )
         )
     except Exception as exc:
@@ -12627,6 +12645,8 @@ def _run_prompt_submit(
     *,
     display_kind: str | None = None,
     display_metadata: dict | None = None,
+    turn_tool_exclusions: set[str] | None = None,
+    model_instruction: str | None = None,
     image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None,
 ) -> bool:
@@ -12940,6 +12960,9 @@ def _run_prompt_submit(
             else:
                 agent.interim_assistant_callback = None
 
+            model_message = (
+                f"{model_instruction}\n\n{run_message}" if model_instruction else run_message
+            )
             run_kwargs = {
                 "conversation_history": list(history),
                 "stream_callback": _stream,
@@ -12962,6 +12985,8 @@ def _run_prompt_submit(
             if display_kind and "persist_user_display_kind" in _run_params:
                 run_kwargs["persist_user_display_kind"] = display_kind
                 run_kwargs["persist_user_display_metadata"] = display_metadata
+            if turn_tool_exclusions and "turn_tool_exclusions" in _run_params:
+                run_kwargs["turn_tool_exclusions"] = set(turn_tool_exclusions)
             # Auto-titling now fires inside the turn prologue (shared by every
             # surface). Hand the agent this session's live-rename hook so the
             # sidebar repaints the moment a title lands, rather than waiting
@@ -12972,7 +12997,7 @@ def _run_prompt_submit(
             )
             _usage_stop, _usage_thread = _start_usage_ticker(sid, agent)
             try:
-                result = agent.run_conversation(run_message, **run_kwargs)
+                result = agent.run_conversation(model_message, **run_kwargs)
             finally:
                 # Stop AND join before anything below emits: an in-flight tick
                 # surviving past message.complete would roll the client's final

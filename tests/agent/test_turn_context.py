@@ -14,6 +14,44 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+
+def test_turn_tool_exclusion_removes_schema_and_dispatch_name_for_one_snapshot():
+    from types import SimpleNamespace
+
+    from agent.turn_context import apply_turn_tool_exclusions
+
+    agent = SimpleNamespace(
+        tools=[
+            {"type": "function", "function": {"name": "clarify"}},
+            {"type": "function", "function": {"name": "session_answer"}},
+        ],
+        valid_tool_names={"clarify", "session_answer"},
+    )
+    apply_turn_tool_exclusions(agent, {"clarify"})
+    assert [tool["function"]["name"] for tool in agent.tools] == ["session_answer"]
+    assert agent.valid_tool_names == {"session_answer"}
+
+
+def test_next_normal_turn_refresh_restores_clarify(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent.turn_context import apply_turn_tool_exclusions, synchronize_agent_tools_for_turn
+
+    clarify = {"type": "function", "function": {"name": "clarify"}}
+    answer = {"type": "function", "function": {"name": "session_answer"}}
+    agent = SimpleNamespace(tools=[clarify, answer], valid_tool_names={"clarify", "session_answer"})
+    apply_turn_tool_exclusions(agent, {"clarify"})
+
+    def refresh(target, quiet_mode=False):
+        target.tools = [clarify, answer]
+        target.valid_tool_names = {"clarify", "session_answer"}
+
+    monkeypatch.setattr("tools.mcp_tool.refresh_agent_tools", refresh)
+    synchronize_agent_tools_for_turn(agent)
+    apply_turn_tool_exclusions(agent, None)
+    assert "clarify" in agent.valid_tool_names
+    assert any(tool["function"]["name"] == "clarify" for tool in agent.tools)
+
 from agent.context_compressor import ContextCompressor
 from agent.turn_context import TurnContext, build_turn_context
 from hermes_state import SessionDB
